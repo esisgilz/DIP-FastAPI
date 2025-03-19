@@ -1,1 +1,6 @@
-fastapi\nuvicorn\ntorch\ntorchvision\npillow
+fastapi
+uvicorn
+torch
+torchvision
+pillow
+
