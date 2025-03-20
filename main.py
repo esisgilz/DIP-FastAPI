@@ -1,48 +1,59 @@
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
-import uvicorn
+import torch
+import torchvision.transforms as transforms
+from PIL import Image
+import io
 import os
-import shutil
-from dip_model import process_image  # Ensure this imports your DIP model function
 
+# Define FastAPI app
 app = FastAPI()
 
-# Allow requests from any host (important for deployment)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
+# Load ResNet model (modify as needed for DIP-based denoising)
+class ResNetDenoiser(torch.nn.Module):
+    def __init__(self):
+        super(ResNetDenoiser, self).__init__()
+        self.model = torch.hub.load("pytorch/vision:v0.10.0", "resnet18", pretrained=True)
+        self.model.fc = torch.nn.Identity()  # Remove classification head
+    
+    def forward(self, x):
+        return self.model(x)
 
-# Create an uploads folder if it doesn't exist
+denoiser = ResNetDenoiser()
+denoiser.eval()
+
+# Transformation for image preprocessing
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+])
+
 UPLOAD_FOLDER = "uploads"
+PROCESSED_FOLDER = "processed"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(PROCESSED_FOLDER, exist_ok=True)
 
-@app.get("/")
-def read_root():
-    return {"message": "DIP FastAPI server is running"}
-
-@app.post("/upload/")
-async def upload_file(file: UploadFile = File(...)):
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-
-    # Save the uploaded file
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-
-    # Process the image using DIP
-    output_path = os.path.join(UPLOAD_FOLDER, "denoised_" + file.filename)
-    process_image(file_path, output_path)  # Call DIP processing function
-
-    return {
-        "filename": file.filename,
-        "output": output_path,
-        "download_url": f"/download/{os.path.basename(output_path)}"
-    }
+@app.post("/process")
+async def process_image(file: UploadFile = File(...)):
+    try:
+        image = Image.open(io.BytesIO(await file.read())).convert("RGB")
+        input_tensor = transform(image).unsqueeze(0)
+        
+        with torch.no_grad():
+            output_tensor = denoiser(input_tensor)
+        
+        output_image = transforms.ToPILImage()(output_tensor.squeeze())
+        output_path = os.path.join(PROCESSED_FOLDER, "denoised.png")
+        output_image.save(output_path)
+        
+        return {"message": "Processing complete", "output_file": output_path}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/download/{filename}")
-async def download_file(filename: str):
-    file_path = os.path.join(UPLOAD_FOLDER, filename)
+def download_file(filename: str):
+    file_path = os.path.join(PROCESSED_FOLDER, filename)
     if os.path.exists(file_path):
-        return FileResponse(file_path, media_type="image/png")
-    return {"error": "File not found"}
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000, timeout_keep_alive=300)  # Increased timeout
+        return FileResponse(file_path, filename=filename)
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
