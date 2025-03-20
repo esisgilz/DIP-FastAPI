@@ -1,12 +1,17 @@
-
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import FileResponse
 from PIL import Image
 import io
+import os
 
-# Define DIP Model (Replace with ResNet model if needed)
+# Define storage directory
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)  # Ensure directory exists
+
+# Define DIP Model (Replace with ResNet if needed)
 class DIPModel(nn.Module):
     def __init__(self):
         super(DIPModel, self).__init__()
@@ -46,7 +51,20 @@ async def upload_image(file: UploadFile = File(...)):
         output = model(img_tensor)
     
     output_img = transforms.ToPILImage()(output.squeeze(0))
-    output_path = "denoised.png"
-    output_img.save(output_path)
 
-    return {"filename": file.filename, "output": output_path}
+    # Save processed image in uploads directory
+    output_filename = f"{UPLOAD_DIR}/denoised_{file.filename}"
+    output_img.save(output_filename)
+
+    return {
+        "filename": file.filename,
+        "output": output_filename,
+        "download_url": f"/download/{os.path.basename(output_filename)}"
+    }
+
+@app.get("/download/{filename}")
+async def download_image(filename: str):
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="image/png")
+    return {"error": "File not found"}
